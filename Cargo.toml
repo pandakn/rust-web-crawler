@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 spider = "2.36.120"
+spider_transformations = "2"

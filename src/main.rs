@@ -1,6 +1,15 @@
-use std::error::Error;
+use std::{
+    error::Error,
+    fs::{create_dir_all, File},
+    io::Write,
+    path::Path,
+};
 
-use spider::{hashbrown::HashSet, tokio, website::Website, Client};
+use spider::{hashbrown::HashSet, tokio, url::Url, website::Website, Client};
+use spider_transformations::{
+    transform_content,
+    transformation::content::{ReturnFormat, TransformConfig},
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -24,19 +33,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                     for url in extracted_urls {
                         match fetch_html(&url).await {
-                            Ok(Some(html)) => {
-                                println!("Fetched HTML:\n{}", html)
+                            Ok(Some(markdown)) => {
+                                if let Err(e) = save_markdown_to_file(&url, &markdown) {
+                                    eprintln!("Failed to save markdown: {}", e);
+                                } else {
+                                    println!("Saved markdown for {}", url);
+                                }
                             }
-                            Ok(None) => println!("Page not found in website object."),
+                            Ok(None) => println!("No content found for {}", url),
                             Err(e) => eprintln!("Error: {}", e),
                         }
                     }
-
-                    // match fetch_html(target_domain).await {
-                    //     Ok(Some(html)) => println!("Fetched HTML:\n{}", html),
-                    //     Ok(None) => println!("Page not found in website object."),
-                    //     Err(e) => eprintln!("Error: {}", e),
-                    // }
                 }
             } else {
                 println!("\nNo Sitemap URLs found in robots.txt.");
@@ -124,18 +131,41 @@ pub async fn fetch_html(url: &str) -> Result<Option<String>, Box<dyn std::error:
     // Perform scraping
     website.scrape_smart().await;
 
-    // Check if the page exists and return the HTML
+    // Check if the page exists and return the Markdown
     if let Some(pages) = website.get_pages() {
         for page in pages.iter() {
-            println!("{:?}", page);
             if page.get_url() == url {
-                return Ok(Some(page.get_html()));
+                let mut conf = TransformConfig::default();
+                conf.return_format = ReturnFormat::Markdown;
+
+                let markdown = transform_content(page, &conf, &None, &None, &None);
+                return Ok(Some(markdown));
             }
         }
     }
 
     Ok(None)
 }
+
+pub fn save_markdown_to_file(url: &str, markdown: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let parsed_url = Url::parse(url)?;
+    let path_segments = parsed_url.path_segments().ok_or("Invalid path")?;
+
+    let filename = match path_segments.last() {
+        Some(segment) if !segment.is_empty() => segment.to_string(),
+        _ => "index".to_string(),
+    };
+
+    let output_dir = Path::new("output");
+    create_dir_all(&output_dir)?;
+
+    let filepath = output_dir.join(format!("{}.md", filename));
+    let mut file = File::create(filepath)?;
+    file.write_all(markdown.as_bytes())?;
+
+    Ok(())
+}
+
 // Process all sitemaps recursively and return a vector of all URLs
 // async fn process_sitemaps_recursively(
 //     initial_sitemaps: &[String],
