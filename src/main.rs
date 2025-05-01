@@ -1,4 +1,5 @@
 use std::{
+    env,
     error::Error,
     fs::{create_dir_all, File},
     io::Write,
@@ -13,9 +14,16 @@ use spider_transformations::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let target_domain = "https://www.heygoody.com";
+    let target_domain_string = parse_arguments().unwrap_or_else(|| {
+        eprintln!("\x1b[31;1mError:\x1b[0m \x1b[31mMissing target domain.\x1b[0m");
+        print_usage();
+        std::process::exit(1);
+    });
+
+    let target_domain: &str = target_domain_string.as_str();
 
     println!("Fetching robots.txt from: {}", target_domain);
+
     match fetch_robots_txt(target_domain).await {
         Ok(Some(robots_content)) => {
             // println!("robots.txt content:\n{}", robots_content);
@@ -58,6 +66,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn print_usage() {
+    println!("\n\x1b[1;34mUsage:\x1b[0m");
+    println!("  \x1b[36mcargo run -- https://www.example.com\x1b[0m\n");
+}
+
+fn parse_arguments() -> Option<String> {
+    let args: Vec<String> = env::args().collect();
+
+    match args.len() {
+        1 => None,
+        len if len >= 2 => Some(args[1].clone()),
+        _ => None,
+    }
 }
 
 async fn fetch_robots_txt(domain: &str) -> Result<Option<String>, Box<dyn Error>> {
@@ -106,7 +129,7 @@ async fn extract_urls_from_sitemap(sitemap_url: &str) -> Vec<String> {
         website.scrape_raw().await;
 
         for page in website.get_pages().unwrap().iter() {
-            let html = page.get_html() else { continue };
+            let html = page.get_html();
             // Extract <loc> tags from HTML using string match (because regex is not allowed)
             for loc_tag in html.match_indices("<loc>") {
                 if let Some(end) = html[loc_tag.0..].find("</loc>") {
