@@ -2,13 +2,12 @@ mod crawler;
 mod sitemap;
 
 use core::str;
-use std::error::Error;
 
 use rust_web_crawler::utils::{cli, fetch, markdown_transformer};
 use spider::{tokio, Client};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() {
     let target_domain_string = cli::parse_arguments().unwrap_or_else(|| {
         eprintln!("\x1b[31;1mError:\x1b[0m \x1b[31mMissing target domain.\x1b[0m");
         cli::print_usage();
@@ -16,19 +15,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     let target_domain: &str = target_domain_string.trim_end_matches("/").as_ref();
-    // markdown_transformer::from_url("https://rsseau.fr/en/").await;
-    //
-    // let content = fetch::fetch_content(
-    //     &Client::default(),
-    //     "https://www.heygoody.com/th/promotion/travelinsurance/travelstudent-10off-dec2024/",
-    // )
-    // .await
-    // .unwrap();
-
-    // markdown_transformer::from_html_content_and_save_file(
-    //     "https://www.heygoody.com/th/promotion/travelinsurance/travelstudent-10off-dec2024/",
-    //     &content,
-    // );
 
     println!("Fetching robots.txt from: {}", target_domain);
     let sitemap_urls_result = fetch_sitemaps_from_robots_txt(target_domain).await;
@@ -37,28 +23,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match sitemap_urls_result {
         Some(sitemap_urls) => {
-            println!("From robots.txt len: {}", sitemap_urls.clone().len());
+            println!("\nFrom robots.txt len: {}", sitemap_urls.clone().len());
             println!("Sitemap URLs from robots.txt: {:?}\n\n", sitemap_urls);
 
             let urls = sitemap::extract_all_urls_from_sitemaps(sitemap_urls).await;
             extracted_urls.extend(urls);
-            // println!("\n\n{}", extracted_urls.len());
-            // println!("{:?}\n\n", extracted_urls);
         }
         None => {
-            println!("No sitemap URLs found.");
+            println!("\nNo sitemap URLs found.");
             println!("Fetching sitemap.xml from: {}", target_domain);
             let sitemap_urls = sitemap::fetch_sitemap_urls(target_domain).await;
 
             match sitemap_urls {
                 Some(sitemap_urls) => {
-                    println!("From sitemap.xml len: {}", sitemap_urls.clone().len());
+                    println!("\nFrom sitemap.xml len: {}", sitemap_urls.clone().len());
                     println!("Sitemap URLs from sitemap.xml: {:?}\n\n", sitemap_urls);
 
                     let urls = sitemap::extract_all_urls_from_sitemaps(sitemap_urls).await;
                     extracted_urls.extend(urls);
-                    // println!("\n\n{}", extracted_urls.len());
-                    // println!("{:?}\n\n", extracted_urls);
                 }
                 None => {
                     println!("No sitemap.xml found.");
@@ -70,10 +52,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    markdown_transformer::from_urls_and_save_files(extracted_urls.clone()).await;
-
     println!("Extracted URLs len: {}", extracted_urls.len());
-    Ok(())
+    markdown_transformer::from_urls_and_save_files(extracted_urls.clone()).await;
 }
 
 /// Parses the `robots.txt` file of the given domain to extract all `Sitemap:` URLs.
