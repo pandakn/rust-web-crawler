@@ -1,250 +1,106 @@
-use std::{
-    env,
-    error::Error,
-    fs::{create_dir_all, File},
-    io::Write,
-    path::Path,
-};
+mod crawler;
+mod sitemap;
 
-use spider::{hashbrown::HashSet, tokio, url::Url, website::Website, Client};
-use spider_transformations::{
-    transform_content,
-    transformation::content::{ReturnFormat, TransformConfig},
-};
+use core::str;
+use std::error::Error;
+
+use rust_web_crawler::utils::{cli, fetch, markdown_transformer};
+use spider::{tokio, Client};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let target_domain_string = parse_arguments().unwrap_or_else(|| {
+    let target_domain_string = cli::parse_arguments().unwrap_or_else(|| {
         eprintln!("\x1b[31;1mError:\x1b[0m \x1b[31mMissing target domain.\x1b[0m");
-        print_usage();
+        cli::print_usage();
         std::process::exit(1);
     });
 
-    let target_domain: &str = target_domain_string.as_str();
+    let target_domain: &str = target_domain_string.trim_end_matches("/").as_ref();
+    // markdown_transformer::from_url("https://rsseau.fr/en/").await;
+    //
+    // let content = fetch::fetch_content(
+    //     &Client::default(),
+    //     "https://www.heygoody.com/th/promotion/travelinsurance/travelstudent-10off-dec2024/",
+    // )
+    // .await
+    // .unwrap();
+
+    // markdown_transformer::from_html_content_and_save_file(
+    //     "https://www.heygoody.com/th/promotion/travelinsurance/travelstudent-10off-dec2024/",
+    //     &content,
+    // );
 
     println!("Fetching robots.txt from: {}", target_domain);
+    let sitemap_urls_result = fetch_sitemaps_from_robots_txt(target_domain).await;
 
-    match fetch_robots_txt(target_domain).await {
-        Ok(Some(robots_content)) => {
-            // println!("robots.txt content:\n{}", robots_content);
-            let sitemap_urls = extract_sitemap_urls(&robots_content);
-            if !sitemap_urls.is_empty() {
-                // println!("\nFound Sitemap URLs:");
-                for url in sitemap_urls.clone() {
-                    let extracted_urls = extract_urls_from_sitemap(&url).await;
-                    println!("\n\n- {}", url);
-                    println!(
-                        "Extracting URLs from sitemap length: {}",
-                        extracted_urls.len()
-                    );
-                    println!("Extracted URLs from sitemap: {:?}\n\n\n\n", extracted_urls);
+    let mut extracted_urls: Vec<String> = Vec::new();
 
-                    for url in extracted_urls {
-                        match fetch_html(&url).await {
-                            Ok(Some(markdown)) => {
-                                if let Err(e) = save_markdown_to_file(&url, &markdown) {
-                                    eprintln!("Failed to save markdown: {}", e);
-                                } else {
-                                    println!("Saved markdown for {}", url);
-                                }
-                            }
-                            Ok(None) => println!("No content found for {}", url),
-                            Err(e) => eprintln!("Error: {}", e),
-                        }
-                    }
+    match sitemap_urls_result {
+        Some(sitemap_urls) => {
+            println!("From robots.txt len: {}", sitemap_urls.clone().len());
+            println!("Sitemap URLs from robots.txt: {:?}\n\n", sitemap_urls);
+
+            let urls = sitemap::extract_all_urls_from_sitemaps(sitemap_urls).await;
+            extracted_urls.extend(urls);
+            // println!("\n\n{}", extracted_urls.len());
+            // println!("{:?}\n\n", extracted_urls);
+        }
+        None => {
+            println!("No sitemap URLs found.");
+            println!("Fetching sitemap.xml from: {}", target_domain);
+            let sitemap_urls = sitemap::fetch_sitemap_urls(target_domain).await;
+
+            match sitemap_urls {
+                Some(sitemap_urls) => {
+                    println!("From sitemap.xml len: {}", sitemap_urls.clone().len());
+                    println!("Sitemap URLs from sitemap.xml: {:?}\n\n", sitemap_urls);
+
+                    let urls = sitemap::extract_all_urls_from_sitemaps(sitemap_urls).await;
+                    extracted_urls.extend(urls);
+                    // println!("\n\n{}", extracted_urls.len());
+                    // println!("{:?}\n\n", extracted_urls);
                 }
-            } else {
-                println!("\nNo Sitemap URLs found in robots.txt.");
+                None => {
+                    println!("No sitemap.xml found.");
+                    let urls = crawler::crawl_urls(target_domain).await;
+
+                    extracted_urls.extend(urls);
+                }
             }
         }
-        Ok(None) => {
-            println!("\nrobots.txt not found on {}", target_domain);
-        }
+    }
+
+    markdown_transformer::from_urls_and_save_files(extracted_urls.clone()).await;
+
+    println!("Extracted URLs len: {}", extracted_urls.len());
+    Ok(())
+}
+
+/// Parses the `robots.txt` file of the given domain to extract all `Sitemap:` URLs.
+///
+/// Returns a list of sitemap URLs if found.
+async fn fetch_sitemaps_from_robots_txt(domain: &str) -> Option<Vec<String>> {
+    let robots_url = format!("{}/robots.txt", domain);
+    let content_response = fetch::fetch_content(&Client::default(), &robots_url).await;
+
+    match content_response {
+        Ok(content) => match str::from_utf8(content.as_bytes()) {
+            Ok(text) => {
+                let sitemap: Vec<String> = text
+                    .lines()
+                    .filter(|line| line.starts_with("Sitemap:"))
+                    .map(|line| line.replace("Sitemap:", "").trim().to_string())
+                    .collect();
+                Some(sitemap)
+            }
+            Err(e) => {
+                eprintln!("Failed to parse robots.txt content as UTF-8: {}", e);
+                None
+            }
+        },
         Err(e) => {
-            eprintln!("\nError fetching robots.txt: {}", e);
+            eprintln!("Failed to fetch robots.txt from {}: {}", robots_url, e);
+            None
         }
     }
-
-    Ok(())
 }
-
-fn print_usage() {
-    println!("\n\x1b[1;34mUsage:\x1b[0m");
-    println!("  \x1b[36mcargo run -- https://www.example.com\x1b[0m\n");
-}
-
-fn parse_arguments() -> Option<String> {
-    let args: Vec<String> = env::args().collect();
-
-    match args.len() {
-        1 => None,
-        len if len >= 2 => Some(args[1].clone()),
-        _ => None,
-    }
-}
-
-async fn fetch_robots_txt(domain: &str) -> Result<Option<String>, Box<dyn Error>> {
-    let robots_url = format!("{}/robots.txt", domain.trim_end_matches('/'));
-    let client = Client::builder().build()?;
-    let response = client.get(robots_url.clone()).send().await?;
-
-    if response.status().is_success() {
-        Ok(Some(response.text().await?))
-    } else if response.status().as_u16() == 404 {
-        Ok(None)
-    } else {
-        Err(format!(
-            "Failed to fetch robots.txt from {}: {}",
-            domain,
-            response.status()
-        )
-        .into())
-    }
-}
-
-fn extract_sitemap_urls(robots_content: &str) -> Vec<String> {
-    let mut sitemap_urls = Vec::new();
-    for line in robots_content.lines() {
-        if line.to_lowercase().starts_with("sitemap:") {
-            if let Some(url) = line.split_whitespace().nth(1) {
-                sitemap_urls.push(url.to_string());
-            }
-        }
-    }
-    sitemap_urls
-}
-
-async fn extract_urls_from_sitemap(sitemap_url: &str) -> Vec<String> {
-    let mut result = Vec::new();
-    let mut visited = HashSet::new();
-    let mut stack = vec![sitemap_url.to_string()];
-
-    while let Some(url) = stack.pop() {
-        if visited.contains(&url) {
-            continue;
-        }
-        visited.insert(url.clone());
-
-        let mut website = Website::new(&url);
-        website.scrape_raw().await;
-
-        for page in website.get_pages().unwrap().iter() {
-            let html = page.get_html();
-            // Extract <loc> tags from HTML using string match (because regex is not allowed)
-            for loc_tag in html.match_indices("<loc>") {
-                if let Some(end) = html[loc_tag.0..].find("</loc>") {
-                    let loc = html[loc_tag.0 + 5..loc_tag.0 + end].trim().to_string();
-                    if loc.ends_with(".xml") {
-                        stack.push(loc);
-                    } else {
-                        result.push(loc);
-                    }
-                }
-            }
-        }
-    }
-
-    result
-}
-
-pub async fn fetch_html(url: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let mut website = Website::new(url);
-    website.configuration.depth = 1;
-
-    // Perform scraping
-    website.scrape_smart().await;
-
-    // Check if the page exists and return the Markdown
-    if let Some(pages) = website.get_pages() {
-        for page in pages.iter() {
-            if page.get_url() == url {
-                let mut conf = TransformConfig::default();
-                conf.return_format = ReturnFormat::Markdown;
-
-                let markdown = transform_content(page, &conf, &None, &None, &None);
-                return Ok(Some(markdown));
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-pub fn save_markdown_to_file(url: &str, markdown: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let parsed_url = Url::parse(url)?;
-    let path_segments = parsed_url.path_segments().ok_or("Invalid path")?;
-
-    let filename = match path_segments.last() {
-        Some(segment) if !segment.is_empty() => segment.to_string(),
-        _ => "index".to_string(),
-    };
-
-    let output_dir = Path::new("output");
-    create_dir_all(&output_dir)?;
-
-    let filepath = output_dir.join(format!("{}.md", filename));
-    let mut file = File::create(filepath)?;
-    file.write_all(markdown.as_bytes())?;
-
-    Ok(())
-}
-
-// Process all sitemaps recursively and return a vector of all URLs
-// async fn process_sitemaps_recursively(
-//     initial_sitemaps: &[String],
-// ) -> Result<Vec<String>, Box<dyn Error>> {
-//     let client = Client::builder().build()?;
-//     let mut all_urls = HashSet::new();
-//     let mut sitemap_queue = VecDeque::new();
-//     let mut processed_sitemaps = HashSet::new();
-
-//     // Add initial sitemaps to queue
-//     for sitemap in initial_sitemaps {
-//         sitemap_queue.push_back(sitemap.clone());
-//     }
-
-//     // Process queue until empty
-//     while let Some(sitemap_url) = sitemap_queue.pop_front() {
-//         // Skip if we've already processed this sitemap
-//         if processed_sitemaps.contains(&sitemap_url) {
-//             continue;
-//         }
-
-//         println!("Processing sitemap: {}", sitemap_url);
-//         processed_sitemaps.insert(sitemap_url.clone());
-
-//         // Download sitemap content
-//         match client.get(&sitemap_url).send().await {
-//             Ok(response) => {
-//                 let mut content = String::new();
-//                 if let Err(e) = response.text().await {
-//                     eprintln!("Error reading sitemap content: {}", e);
-//                     continue;
-//                 }
-
-//                 // Process the sitemap XML
-//                 // let (urls, nested_sitemaps) = parse_sitemap_xml(&content);
-
-//                 // // Process the sitemap XML
-//                 // let (urls, nested_sitemaps) = parse_sitemap_xml(&content);
-
-//                 // // Add page URLs to result
-//                 // for url in urls {
-//                 //     all_urls.insert(url);
-//                 // }
-
-//                 // // Add nested sitemaps to the queue
-//                 // for nested_sitemap in nested_sitemaps {
-//                 //     if !processed_sitemaps.contains(&nested_sitemap) {
-//                 //         sitemap_queue.push_back(nested_sitemap);
-//                 //     }
-//                 // }
-//             }
-//             Err(e) => {
-//                 eprintln!("Error downloading sitemap {}: {}", sitemap_url, e);
-//             }
-//         }
-//     }
-
-//     Ok(all_urls.into_iter().collect())
-// }
